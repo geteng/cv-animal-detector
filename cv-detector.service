@@ -1,0 +1,16 @@
+[Unit]
+Description=CV Animal Detector Service
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu
+Environment=PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu
+ExecStart=/usr/bin/python3 /home/ubuntu/main.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

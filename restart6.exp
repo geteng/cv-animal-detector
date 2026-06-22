@@ -1,0 +1,5 @@
+#!/usr/bin/expect -f
+set timeout 15
+spawn ssh -o StrictHostKeyChecking=no ubuntu@106.54.38.207 "pkill -f 'python3 main.py' 2>/dev/null; rm -f /home/ubuntu/app.log; nohup env PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu /usr/bin/python3 /home/ubuntu/main.py > /home/ubuntu/app.log 2>&1 & sleep 8 && cat /home/ubuntu/app.log"
+expect "password:" { send "Gtt@123456789\r" }
+expect eof

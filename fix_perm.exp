@@ -1,0 +1,5 @@
+#!/usr/bin/expect -f
+set timeout 15
+spawn ssh -o StrictHostKeyChecking=no ubuntu@106.54.38.207 "sudo chmod o+x /home/ubuntu && sudo chmod -R o+r /home/ubuntu/video/ && echo 'fixed' && sudo -u www-data cat /home/ubuntu/video/未穿戴反光衣检测.mp4 > /dev/null 2>&1 && echo 'now readable'"
+expect "password:" { send "Gtt@123456789\r" }
+expect eof

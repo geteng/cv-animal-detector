@@ -1,0 +1,5 @@
+#!/usr/bin/expect -f
+set timeout 15
+spawn ssh -o StrictHostKeyChecking=no ubuntu@106.54.38.207 "echo CONNECTED; uname -a; which docker; docker --version 2>/dev/null; free -h | head -2; df -h / | tail -1"
+expect "password:" { send "Gtt@123456789\r" }
+expect eof

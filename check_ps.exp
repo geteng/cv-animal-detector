@@ -1,0 +1,5 @@
+#!/usr/bin/expect -f
+set timeout 15
+spawn ssh -o StrictHostKeyChecking=no ubuntu@106.54.38.207 "ps aux | grep 'docker build' | grep -v grep; echo '---'; wc -c /home/ubuntu/build.log 2>/dev/null; echo '---'; cat /home/ubuntu/build.log 2>/dev/null | wc -l"
+expect "password:" { send "Gtt@123456789\r" }
+expect eof

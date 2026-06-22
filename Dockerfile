@@ -1,7 +1,7 @@
 # CV Animal Detector - Docker 镜像
 # 适用于腾讯云轻量应用服务器 (amd64)
 
-FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
 
 WORKDIR /app
 

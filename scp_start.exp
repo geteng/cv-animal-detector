@@ -1,0 +1,5 @@
+#!/usr/bin/expect -f
+set timeout 30
+spawn scp -o StrictHostKeyChecking=no /Users/geteng/aionclaw/project/cv-animal-detector/start.sh ubuntu@106.54.38.207:/home/ubuntu/start.sh
+expect "password:" { send "Gtt@123456789\r" }
+expect eof

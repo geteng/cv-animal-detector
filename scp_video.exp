@@ -1,0 +1,5 @@
+#!/usr/bin/expect -f
+set timeout 300
+spawn scp -o StrictHostKeyChecking=no /Users/geteng/aionclaw/project/cv-animal-detector/video/*.mp4 ubuntu@106.54.38.207:/home/ubuntu/video/
+expect "password:" { send "Gtt@123456789\r" }
+expect eof

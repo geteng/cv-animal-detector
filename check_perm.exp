@@ -1,0 +1,5 @@
+#!/usr/bin/expect -f
+set timeout 15
+spawn ssh -o StrictHostKeyChecking=no ubuntu@106.54.38.207 "ls -la /home/ubuntu/video/; echo '==='; name=\$(ls /home/ubuntu/video/ | head -1); file /home/ubuntu/video/\"\$name\"; echo '==='; sudo -u www-data cat /home/ubuntu/video/未穿戴反光衣检测.mp4 > /dev/null 2>&1 && echo 'readable' || echo 'NOT readable'"
+expect "password:" { send "Gtt@123456789\r" }
+expect eof

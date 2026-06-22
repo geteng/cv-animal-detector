@@ -1,0 +1,8 @@
+#!/usr/bin/expect -f
+set timeout 600
+spawn ssh -o StrictHostKeyChecking=no ubuntu@106.54.38.207 "sudo docker build --no-cache -t cv-animal-detector /home/ubuntu/cv-animal-detector 2>&1"
+expect "password:" { send "Gtt@123456789\r" }
+expect {
+  "password for ubuntu:" { send "Gtt@123456789\r"; exp_continue }
+  eof
+}

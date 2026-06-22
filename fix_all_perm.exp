@@ -1,0 +1,5 @@
+#!/usr/bin/expect -f
+set timeout 15
+spawn ssh -o StrictHostKeyChecking=no ubuntu@106.54.38.207 "sudo chmod 644 /home/ubuntu/video/*.mp4 && ls /home/ubuntu/video/*.mp4 | wc -l"
+expect "password:" { send "Gtt@123456789\r" }
+expect eof

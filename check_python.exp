@@ -1,0 +1,5 @@
+#!/usr/bin/expect -f
+set timeout 30
+spawn ssh -o StrictHostKeyChecking=no ubuntu@106.54.38.207 "python3 --version && pip3 --version && which python3"
+expect "password:" { send "Gtt@123456789\r" }
+expect eof

@@ -1,0 +1,5 @@
+#!/usr/bin/expect -f
+set timeout 15
+spawn ssh -o StrictHostKeyChecking=no ubuntu@106.54.38.207 "ls -la /home/ubuntu/video/; echo '==='; curl -sI https://127.0.0.1/video/人脸识别.mp4 | head -5"
+expect "password:" { send "Gtt@123456789\r" }
+expect eof

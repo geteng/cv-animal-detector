@@ -1,0 +1,5 @@
+#!/usr/bin/expect -f
+set timeout 120
+spawn ssh -o StrictHostKeyChecking=no ubuntu@106.54.38.207 "rm -f /home/ubuntu/app.log; env PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu /usr/bin/python3 -c 'from ultralytics import YOLO; print(\"OK\")' 2>&1"
+expect "password:" { send "Gtt@123456789\r" }
+expect eof

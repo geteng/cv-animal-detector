@@ -1,0 +1,8 @@
+#!/usr/bin/expect -f
+set timeout 120
+spawn ssh -o StrictHostKeyChecking=no ubuntu@106.54.38.207 "sudo snap install --classic certbot 2>&1 && sudo ln -sf /snap/bin/certbot /usr/bin/certbot && echo 'certbot installed'"
+expect "password:" { send "Gtt@123456789\r" }
+expect {
+  "password for ubuntu:" { send "Gtt@123456789\r"; exp_continue }
+  eof
+}

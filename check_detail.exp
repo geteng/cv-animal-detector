@@ -1,0 +1,5 @@
+#!/usr/bin/expect -f
+set timeout 15
+spawn ssh -o StrictHostKeyChecking=no ubuntu@106.54.38.207 "ps aux | grep 'python3 main' | grep -v grep; echo '==='; ls -la /home/ubuntu/app.log 2>/dev/null; echo '==='; wc -c /home/ubuntu/app.log; echo '==='; md5sum /home/ubuntu/app.log 2>/dev/null || md5 /home/ubuntu/app.log 2>/dev/null"
+expect "password:" { send "Gtt@123456789\r" }
+expect eof

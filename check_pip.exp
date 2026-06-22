@@ -1,0 +1,5 @@
+#!/usr/bin/expect -f
+set timeout 15
+spawn ssh -o StrictHostKeyChecking=no ubuntu@106.54.38.207 "tail -5 /home/ubuntu/pip_install.log 2>/dev/null; echo '---SIZE---'; wc -c /home/ubuntu/pip_install.log 2>/dev/null"
+expect "password:" { send "Gtt@123456789\r" }
+expect eof

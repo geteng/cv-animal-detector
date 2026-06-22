@@ -1,0 +1,5 @@
+#!/usr/bin/expect -f
+set timeout 15
+spawn ssh -o StrictHostKeyChecking=no ubuntu@106.54.38.207 "sudo docker system prune -af 2>/dev/null; rm -f /home/ubuntu/build.log; cat /home/ubuntu/cv-animal-detector/Dockerfile | head -1"
+expect "password:" { send "Gtt@123456789\r" }
+expect eof

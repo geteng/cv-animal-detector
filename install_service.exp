@@ -1,0 +1,8 @@
+#!/usr/bin/expect -f
+set timeout 30
+spawn ssh -o StrictHostKeyChecking=no ubuntu@106.54.38.207 "sudo cp /home/ubuntu/cv-detector.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable cv-detector && echo 'systemd service installed'"
+expect "password:" { send "Gtt@123456789\r" }
+expect {
+  "password for ubuntu:" { send "Gtt@123456789\r"; exp_continue }
+  eof
+}

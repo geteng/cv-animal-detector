@@ -1,0 +1,5 @@
+#!/usr/bin/expect -f
+set timeout 15
+spawn ssh -o StrictHostKeyChecking=no ubuntu@106.54.38.207 "sudo ls -la /var/lib/docker/overlay2/ 2>/dev/null | wc -l; echo '---'; sudo du -sh /var/lib/docker/ 2>/dev/null; echo '---'; free -m | head -2"
+expect "password:" { send "Gtt@123456789\r" }
+expect eof

@@ -1,0 +1,5 @@
+#!/usr/bin/expect -f
+set timeout 300
+spawn ssh -o StrictHostKeyChecking=no ubuntu@106.54.38.207 "pkill -f 'python3 main.py' 2>/dev/null; rm -f /home/ubuntu/app.log; chmod +x /home/ubuntu/start.sh; nohup /home/ubuntu/start.sh > /home/ubuntu/app.log 2>&1 & sleep 20 && echo '---LOG---' && cat /home/ubuntu/app.log && echo '---CURL---' && curl -s http://localhost:8000/"
+expect "password:" { send "Gtt@123456789\r" }
+expect eof

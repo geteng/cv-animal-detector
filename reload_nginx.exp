@@ -1,0 +1,8 @@
+#!/usr/bin/expect -f
+set timeout 30
+spawn ssh -o StrictHostKeyChecking=no ubuntu@106.54.38.207 "sudo cp /home/ubuntu/nginx-gtt666-ssl.conf /etc/nginx/sites-available/gtt666.cn && sudo nginx -t && sudo systemctl reload nginx && echo 'HTTPS configured OK'"
+expect "password:" { send "Gtt@123456789\r" }
+expect {
+  "password for ubuntu:" { send "Gtt@123456789\r"; exp_continue }
+  eof
+}

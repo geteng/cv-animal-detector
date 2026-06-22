@@ -1,0 +1,8 @@
+#!/usr/bin/expect -f
+set timeout 120
+spawn ssh -o StrictHostKeyChecking=no ubuntu@106.54.38.207 "sudo systemctl stop nginx && sudo certbot certonly --standalone -d gtt666.cn --non-interactive --agree-tos --email admin@gtt666.cn 2>&1 && sudo systemctl start nginx && echo 'SSL certificate obtained'"
+expect "password:" { send "Gtt@123456789\r" }
+expect {
+  "password for ubuntu:" { send "Gtt@123456789\r"; exp_continue }
+  eof
+}

@@ -1,0 +1,5 @@
+#!/usr/bin/expect -f
+set timeout 15
+spawn ssh -o StrictHostKeyChecking=no ubuntu@106.54.38.207 "curl -sI https://127.0.0.1/video/%E6%9C%AA%E7%A9%BF%E6%88%B4%E5%8F%8D%E5%85%89%E8%A1%A3%E6%A3%80%E6%B5%8B.mp4 2>/dev/null | head -5"
+expect "password:" { send "Gtt@123456789\r" }
+expect eof
