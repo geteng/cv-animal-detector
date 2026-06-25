@@ -1,0 +1,5 @@
+#!/usr/bin/expect -f
+set timeout 15
+spawn ssh -o StrictHostKeyChecking=no ubuntu@106.54.38.207 {free -m && echo '---' && df -h / && echo '---' && python3 -c "import torch; print(f'CUDA: {torch.cuda.is_available()}'); print(f'MPS: {torch.backends.mps.is_available()}')" 2>/dev/null || echo "no torch"}
+expect "password:" { send "Gtt@123456789\r" }
+expect eof

@@ -1,0 +1,15 @@
+#!/usr/bin/expect -f
+set timeout 30
+spawn ssh -o StrictHostKeyChecking=no ubuntu@106.54.38.207 {python3 -c '
+from ultralytics import YOLO
+model = YOLO("yolov8s-oiv7.pt")
+names = model.names
+keywords = ["helmet", "vest", "uniform", "sleep", "fall", "smok", "phone", "cell", "fight", "bicycle", "motor", "truck", "car", "person", "head", "jacket", "reflective", "cigarette", "vehicle", "scooter", "electric", "hat", "cloth", "lying", "mobile"]
+for k in sorted(keywords):
+    matches = [(i, n) for i, n in names.items() if k.lower() in n.lower()]
+    if matches:
+        for i, n in matches:
+            print(f"{i}: {n}")
+'}
+expect "password:" { send "Gtt@123456789\r" }
+expect eof
