@@ -5,6 +5,9 @@ CV Detector - 多场景视觉检测 API
 
 import io
 import logging
+import base64
+import time
+import json as json_module
 from typing import Optional
 
 import numpy as np
@@ -13,6 +16,7 @@ from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from ultralytics import YOLO
+import httpx
 
 # ---------------------------------------------------------------------------
 # 配置
@@ -27,6 +31,14 @@ TARGET_CLASSES = {
 DEFAULT_CONF = 0.35
 PERSON_CONF = 0.30
 MIN_BBOX_RATIO = 0.005
+
+# 阿里云百炼 qwen3-vl-flash 配置
+DASHSCOPE_API_KEY = "sk-81e9a117da104e2eb026307a7300a886"
+DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+DASHSCOPE_MODEL = "qwen3-vl-flash"
+VL_MAX_PIXELS = 1024 * 1024
+VL_MAX_TOKENS = 300
+VL_TIMEOUT = 180
 
 # ---------------------------------------------------------------------------
 # 日志 & 模型
@@ -70,6 +82,17 @@ class VehicleDetectResponse(BaseModel):
 
 class GenericDetectResponse(BaseModel):
     success: bool; has_target: bool; target_count: int; detections: list[Detection]; alert_level: str; message: str
+
+class PersonAnimalResponse(BaseModel):
+    success: bool; has_person: bool; person_count: int
+    has_animal: bool; animal_count: int
+    animals: list[dict]  # [{"type": "狗", "count": 2}, ...]
+    detections: list[Detection]; message: str
+
+class VLPersonAnimalResponse(BaseModel):
+    success: bool; has_person: bool; person_count: int
+    has_animal: bool; animals: list[dict]
+    elapsed_ms: int; model: str; message: str
 
 # ---------------------------------------------------------------------------
 # 工具函数
@@ -182,6 +205,81 @@ async def detect_person(file: UploadFile = File(...)):
     if n == 0: return PersonDetectResponse(success=True, has_person=False, person_count=0, detections=[], alert_level="none", message="未检测到人员")
     elif n == 1: return PersonDetectResponse(success=True, has_person=True, person_count=1, detections=dets, alert_level="warning", message=f"检测到 1 名人员")
     else: return PersonDetectResponse(success=True, has_person=True, person_count=n, detections=dets, alert_level="critical", message=f"检测到 {n} 名人员")
+
+# ===================================================================
+# 3.5. 人物+动物联合检测 (YOLO)
+# ===================================================================
+
+# 动物类别映射（YOLO Open Images V7 中的动物类名 → 中文）
+ANIMAL_CLASS_MAP = {
+    "Dog": "狗", "Cat": "猫", "Bird": "鸟", "Horse": "马", "Cow": "牛",
+    "Sheep": "羊", "Goat": "山羊", "Pig": "猪", "Chicken": "鸡", "Duck": "鸭",
+    "Goose": "鹅", "Turkey": "火鸡", "Rabbit": "兔子", "Squirrel": "松鼠",
+    "Deer": "鹿", "Fox": "狐狸", "Bear": "熊", "Elephant": "大象",
+    "Giraffe": "长颈鹿", "Zebra": "斑马", "Monkey": "猴子", "Camel": "骆驼",
+    "Snake": "蛇", "Lizard": "蜥蜴", "Frog": "青蛙", "Turtle": "乌龟",
+    "Fish": "鱼", "Crab": "螃蟹", "Butterfly": "蝴蝶", "Dragonfly": "蜻蜓",
+    "Bee": "蜜蜂", "Spider": "蜘蛛", "Eagle": "鹰", "Owl": "猫头鹰",
+    "Parrot": "鹦鹉", "Penguin": "企鹅", "Wild boar": "野猪",
+    "Rhinoceros": "犀牛", "Hippopotamus": "河马", "Leopard": "豹",
+    "Tiger": "老虎", "Lion": "狮子", "Wolf": "狼", "Raccoon": "浣熊",
+    "Hedgehog": "刺猬", "Otter": "水獭", "Seal": "海豹", "Whale": "鲸鱼",
+    "Dolphin": "海豚", "Shark": "鲨鱼", "Jellyfish": "水母",
+    "Starfish": "海星", "Octopus": "章鱼", "Swan": "天鹅", "Peacock": "孔雀",
+    "Antelope": "羚羊", "Kangaroo": "袋鼠", "Koala": "考拉",
+    "Panda": "熊猫", "Polar bear": "北极熊", "Crocodile": "鳄鱼",
+    "Scorpion": "蝎子", "Snail": "蜗牛", "Ladybug": "瓢虫",
+    "Hamster": "仓鼠", "Guinea pig": "豚鼠", "Mouse": "老鼠", "Rat": "大鼠",
+    "Bat": "蝙蝠", "Ostrich": "鸵鸟", "Caterpillar": "毛毛虫",
+    "Centipede": "蜈蚣", "Lobster": "龙虾", "Shrimp": "虾",
+    "Mule": "骡子", "Donkey": "驴", "Llama": "羊驼",
+    "Worm": "蠕虫", "Ant": "蚂蚁", "Beetle": "甲虫", "Cockroach": "蟑螂",
+    "Fly": "苍蝇", "Mosquito": "蚊子", "Moth": "飞蛾", "Wasp": "黄蜂",
+    "Goldfish": "金鱼", "Sparrow": "麻雀", "Pigeon": "鸽子", "Crow": "乌鸦",
+    "Woodpecker": "啄木鸟", "Hummingbird": "蜂鸟", "Seahorse": "海马",
+    "Sea turtle": "海龟", "Stingray": "鳐鱼", "Squid": "鱿鱼",
+}
+
+@app.post("/detect/person-animal", response_model=PersonAnimalResponse)
+async def detect_person_animal(file: UploadFile = File(...)):
+    """检测图中是否有人以及有什么动物，区分动物种类"""
+    allowed_image(file)
+    image, img_w, img_h = await read_image(file)
+    result = run_inference(image, conf=0.2)
+    
+    # 提取人物
+    persons = extract_detections(result, class_filter={"Person"}, min_bbox_ratio=MIN_BBOX_RATIO, img_w=img_w, img_h=img_h)
+    for p in persons: p.label = "人员"
+    
+    # 提取动物
+    animal_filter = set(ANIMAL_CLASS_MAP.keys())
+    animal_dets = extract_detections(result, class_filter=animal_filter)
+    for a in animal_dets: a.label = ANIMAL_CLASS_MAP.get(a.class_name, a.class_name)
+    
+    # 统计动物种类
+    animal_type_count = {}
+    for a in animal_dets:
+        name = a.label
+        animal_type_count[name] = animal_type_count.get(name, 0) + 1
+    animals = [{"type": k, "count": v} for k, v in sorted(animal_type_count.items(), key=lambda x: -x[1])]
+    
+    all_dets = persons + animal_dets
+    has_p = len(persons) > 0
+    has_a = len(animal_dets) > 0
+    
+    parts = []
+    if has_p: parts.append(f"{len(persons)} 人")
+    if has_a: parts.append(f"{len(animal_dets)} 只动物")
+    msg = "检测到 " + "，".join(parts) if parts else "未检测到人或动物"
+    if animals:
+        animal_str = "，".join(f"{a['type']}×{a['count']}" for a in animals[:8])
+        msg += f" ({animal_str})"
+    
+    return PersonAnimalResponse(
+        success=True, has_person=has_p, person_count=len(persons),
+        has_animal=has_a, animal_count=len(animal_dets),
+        animals=animals, detections=all_dets, message=msg
+    )
 
 # ===================================================================
 # 4. 未佩戴安全帽检测（优化版）
@@ -589,6 +687,11 @@ h1{font-size:22px;font-weight:700;text-align:center;margin-bottom:4px;background
 <h1>🔍 CV Detector 视觉检测平台</h1>
 <p class="subtitle">选择检测类型 → 上传图片 → AI 自动分析</p>
 
+<div class="api-selector" id="modeSelector" style="margin-bottom:10px">
+<button class="api-btn active" data-mode="yolo" style="background:linear-gradient(135deg,#38bdf8,#818cf8);color:#fff;border-color:transparent">🧠 YOLO 本地模型</button>
+<button class="api-btn" data-mode="vl" style="background:#1e293b;color:#94a3b8;border:1px solid #475569">☁️ 百炼 AI 视觉</button>
+</div>
+
 <div class="api-selector" id="apiSelector">
 <button class="api-btn active" data-api="/detect">🐾 动物检测</button>
 <button class="api-btn" data-api="/detect/person">👤 人员入侵检测</button>
@@ -603,6 +706,24 @@ h1{font-size:22px;font-weight:700;text-align:center;margin-bottom:4px;background
 <button class="api-btn" data-api="/detect/e-bike">🛵 电瓶车检测</button>
 <button class="api-btn" data-api="/detect/truck">🚛 货车检测</button>
 <button class="api-btn" data-api="/detect/car">🚗 小汽车检测</button>
+<button class="api-btn" data-api="/detect/person-animal">👤🐾 人物+动物检测</button>
+</div>
+
+<div class="api-selector" id="vlApiSelector" style="display:none">
+<button class="api-btn" data-api="/detect/vl">🧠 统一检测（12项）</button>
+<button class="api-btn" data-api="/detect/vl/no-helmet">⛑️ 未佩戴安全帽检测</button>
+<button class="api-btn" data-api="/detect/vl/no-reflective-vest">🦺 未穿戴反光衣检测</button>
+<button class="api-btn" data-api="/detect/vl/no-workwear">👔 未穿工服检测</button>
+<button class="api-btn" data-api="/detect/vl/sleeping">😴 睡岗检测</button>
+<button class="api-btn" data-api="/detect/vl/fall">🤸 跌倒检测</button>
+<button class="api-btn" data-api="/detect/vl/smoking">🚬 抽烟检测</button>
+<button class="api-btn" data-api="/detect/vl/phone">📱 使用手机检测</button>
+<button class="api-btn" data-api="/detect/vl/fight">👊 打架检测</button>
+<button class="api-btn" data-api="/detect/vl/hot-work">🔥 动火离人检测</button>
+<button class="api-btn" data-api="/detect/vl/e-bike">🛵 电瓶车检测</button>
+<button class="api-btn" data-api="/detect/vl/truck">🚛 货车检测</button>
+<button class="api-btn" data-api="/detect/vl/car">🚗 小汽车检测</button>
+<button class="api-btn" data-api="/detect/vl/person-animal">👤🐾 人物+动物检测</button>
 </div>
 
 <div class="dropzone" id="dropzone">
@@ -631,6 +752,7 @@ h1{font-size:22px;font-weight:700;text-align:center;margin-bottom:4px;background
 <script>
 let selectedFile = null;
 let currentApi = '/detect';
+let currentMode = 'yolo';
 
 const COLOR_MAP = {
   'Person':'#38bdf8','Snake':'#4ade80','Lizard':'#fbbf24','Cat':'#f472b6','Dog':'#a78bfa','Wild boar':'#fb923c',
@@ -647,11 +769,56 @@ const COLOR_MAP = {
 };
 
 const apiSelector = document.getElementById('apiSelector');
-apiSelector.addEventListener('click', (e) => {
-  if (e.target.classList.contains('api-btn')) {
+const vlApiSelector = document.getElementById('vlApiSelector');
+const modeSelector = document.getElementById('modeSelector');
+
+// 模式切换
+modeSelector.addEventListener('click', (e) => {
+  const btn = e.target.closest('.api-btn');
+  if (!btn) return;
+  modeSelector.querySelectorAll('.api-btn').forEach(b => {
+    b.classList.remove('active');
+    b.style.background = '#1e293b';
+    b.style.color = '#94a3b8';
+    b.style.border = '1px solid #475569';
+  });
+  btn.classList.add('active');
+  btn.style.background = 'linear-gradient(135deg,#38bdf8,#818cf8)';
+  btn.style.color = '#fff';
+  btn.style.borderColor = 'transparent';
+  currentMode = btn.dataset.mode;
+  if (currentMode === 'vl') {
+    apiSelector.style.display = 'none';
+    vlApiSelector.style.display = 'flex';
+    currentApi = '/detect/vl';
+    vlApiSelector.querySelectorAll('.api-btn').forEach(b => b.classList.remove('active'));
+    vlApiSelector.querySelector('[data-api="/detect/vl"]').classList.add('active');
+  } else {
+    apiSelector.style.display = 'flex';
+    vlApiSelector.style.display = 'none';
+    currentApi = '/detect';
     apiSelector.querySelectorAll('.api-btn').forEach(b => b.classList.remove('active'));
-    e.target.classList.add('active');
-    currentApi = e.target.dataset.api;
+    apiSelector.querySelector('[data-api="/detect"]').classList.add('active');
+  }
+});
+
+// YOLO 接口选择
+apiSelector.addEventListener('click', (e) => {
+  const btn = e.target.closest('.api-btn');
+  if (btn) {
+    apiSelector.querySelectorAll('.api-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentApi = btn.dataset.api;
+  }
+});
+
+// 百炼接口选择
+vlApiSelector.addEventListener('click', (e) => {
+  const btn = e.target.closest('.api-btn');
+  if (btn) {
+    vlApiSelector.querySelectorAll('.api-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentApi = btn.dataset.api;
   }
 });
 
@@ -693,17 +860,31 @@ function handleFile(file) {
 }
 
 // 所有接口列表
-const ALL_APIS = [
-  '/detect', '/detect/person', '/detect/helmet', '/detect/reflective-vest',
+const ALL_APIS_YOLO = [
+  '/detect', '/detect/person', '/detect/person-animal', '/detect/helmet', '/detect/reflective-vest',
   '/detect/uniform', '/detect/sleeping', '/detect/fall', '/detect/smoking',
   '/detect/phone', '/detect/fight', '/detect/e-bike', '/detect/truck', '/detect/car'
+];
+
+const ALL_APIS_VL = [
+  '/detect/vl/no-helmet', '/detect/vl/no-reflective-vest', '/detect/vl/no-workwear',
+  '/detect/vl/sleeping', '/detect/vl/fall', '/detect/vl/smoking',
+  '/detect/vl/phone', '/detect/vl/fight', '/detect/vl/hot-work',
+  '/detect/vl/e-bike', '/detect/vl/truck', '/detect/vl/car', '/detect/vl/person-animal'
 ];
 
 const API_LABELS = {
   '/detect':'🐾 动物检测', '/detect/person':'👤 人员入侵检测', '/detect/helmet':'⛑️ 未佩戴安全帽检测',
   '/detect/reflective-vest':'🦺 未穿戴反光衣检测', '/detect/uniform':'👔 未穿工服检测', '/detect/sleeping':'😴 睡岗检测',
   '/detect/fall':'🤸 跌倒检测', '/detect/smoking':'🚬 抽烟检测', '/detect/phone':'📱 使用手机检测',
-  '/detect/fight':'👊 打架检测', '/detect/e-bike':'🛵 电瓶车检测', '/detect/truck':'🚛 货车检测', '/detect/car':'🚗 小汽车检测'
+  '/detect/fight':'👊 打架检测', '/detect/e-bike':'🛵 电瓶车检测', '/detect/truck':'🚛 货车检测', '/detect/car':'🚗 小汽车检测',
+  '/detect/person-animal':'👤🐾 人物+动物检测',
+  '/detect/vl/no-helmet':'⛑️ 未佩戴安全帽检测', '/detect/vl/no-reflective-vest':'🦺 未穿戴反光衣检测',
+  '/detect/vl/no-workwear':'👔 未穿工服检测', '/detect/vl/sleeping':'😴 睡岗检测',
+  '/detect/vl/fall':'🤸 跌倒检测', '/detect/vl/smoking':'🚬 抽烟检测', '/detect/vl/phone':'📱 使用手机检测',
+  '/detect/vl/fight':'👊 打架检测', '/detect/vl/hot-work':'🔥 动火离人检测',
+  '/detect/vl/e-bike':'🛵 电瓶车检测', '/detect/vl/truck':'🚛 货车检测', '/detect/vl/car':'🚗 小汽车检测',
+  '/detect/vl/person-animal':'👤🐾 人物+动物检测'
 };
 
 function getSummary(data, api) {
@@ -738,6 +919,18 @@ function getSummary(data, api) {
     if (data.has_vehicle) return { icon:'🚨', text:data.vehicle_count+'辆', color:'#fbbf24', level:'warning' };
     return { icon:'✅', text:'未检测到', color:'#4ade80', level:'none' };
   }
+  if (api === '/detect/person-animal') {
+    const parts = [];
+    if (data.has_person) parts.push(data.person_count+'人');
+    if (data.has_animal) parts.push(data.animal_count+'只动物');
+    if (parts.length === 0) return { icon:'✅', text:'无人无动物', color:'#4ade80', level:'none' };
+    return { icon:'🔍', text:parts.join(' '), color:'#38bdf8', level:'none' };
+  }
+  // 百炼接口
+  if (api.startsWith('/detect/vl/')) {
+    if (data.is_alarm) return { icon:'⚠️', text:'报警', color:'#f87171', level:'warning' };
+    return { icon:'✅', text:'安全', color:'#4ade80', level:'none' };
+  }
   return { icon:'?', text:'-', color:'#94a3b8', level:'none' };
 }
 
@@ -749,17 +942,20 @@ btnDetectAll.addEventListener('click', async () => {
   result.classList.remove('show','none','warning','critical','error');
   clearCanvas();
 
+  const apis = currentMode === 'vl' ? ALL_APIS_VL : ALL_APIS_YOLO;
+  const totalApis = apis.length;
+
   // 显示进度
   result.className = 'result show none';
-  result.innerHTML = '<div class="result-icon">⏳</div><div class="result-title" style="color:#38bdf8">正在全量检测中...</div><div class="result-detail" id="allProgress">准备调用 13 个接口</div>';
+  result.innerHTML = '<div class="result-icon">⏳</div><div class="result-title" style="color:#38bdf8">正在全量检测中...</div><div class="result-detail" id="allProgress">准备调用 '+totalApis+' 个接口</div>';
 
   const allResults = [];
   let completed = 0;
 
   // 并发调用所有接口（每批3个，避免服务器过载）
   const batchSize = 3;
-  for (let i = 0; i < ALL_APIS.length; i += batchSize) {
-    const batch = ALL_APIS.slice(i, i + batchSize);
+  for (let i = 0; i < apis.length; i += batchSize) {
+    const batch = apis.slice(i, i + batchSize);
     const promises = batch.map(async (api) => {
       const fd = new FormData(); fd.append('file', selectedFile);
       try {
@@ -773,14 +969,14 @@ btnDetectAll.addEventListener('click', async () => {
     const batchResults = await Promise.all(promises);
     allResults.push(...batchResults);
     completed += batch.length;
-    document.getElementById('allProgress').textContent = `已完成 ${completed}/${ALL_APIS.length} 个接口`;
+    document.getElementById('allProgress').textContent = '已完成 '+completed+'/'+totalApis+' 个接口';
   }
 
   // 渲染汇总结果
   let warnings = 0, criticals = 0;
   let html = '<div class="result-icon">📊</div>';
   html += '<div class="result-title" style="color:#e2e8f0">全量检测报告</div>';
-  html += '<div class="result-detail" style="margin-bottom:12px">共调用 13 个接口，结果如下：</div>';
+  html += '<div class="result-detail" style="margin-bottom:12px">共调用 '+totalApis+' 个接口，结果如下：</div>';
   html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;text-align:left;max-height:360px;overflow-y:auto;padding:0 8px">';
 
   allResults.forEach(r => {
@@ -903,12 +1099,62 @@ function renderResult(data) {
   } else if (currentApi === '/detect/e-bike' || currentApi === '/detect/truck' || currentApi === '/detect/car') {
     if (data.has_vehicle) { icon='🚨'; title='检测到 '+data.vehicle_count+' 辆'; titleColor='#fbbf24'; level='warning'; }
     else { icon='✅'; title='未检测到目标车辆'; titleColor='#4ade80'; }
+  } else if (currentApi === '/detect/person-animal') {
+    icon='🔍'; title='人物+动物检测'; titleColor='#38bdf8';
+    const parts = [];
+    if (data.has_person) parts.push(data.person_count+' 人');
+    if (data.has_animal) {
+      parts.push(data.animal_count+' 只动物');
+      if (data.animals && data.animals.length > 0) {
+        detail = data.animals.map(a => a.type+'×'+a.count).join('，');
+      }
+    }
+    if (parts.length === 0) { title='未检测到人或动物'; titleColor='#94a3b8'; }
+    else { title = parts.join('，'); }
+    level = 'none';
+  } else if (currentApi === '/detect/vl/person-animal') {
+    icon='🔍'; title='百炼人物+动物检测'; titleColor='#a78bfa';
+    const parts = [];
+    if (data.has_person) parts.push(data.person_count+' 人');
+    if (data.has_animal) {
+      const animalCount = data.animals ? data.animals.reduce((s,a)=>s+(a.count||1),0) : 0;
+      parts.push(animalCount+' 只动物');
+      if (data.animals && data.animals.length > 0) {
+        detail = data.animals.map(a => a.type+'×'+(a.count||1)).join('，');
+      }
+    }
+    if (parts.length === 0) { title='未检测到人或动物'; titleColor='#94a3b8'; }
+    else { title = parts.join('，'); }
+    detail = (detail||'') + ' ('+data.elapsed_ms+'ms)';
+    level = 'none';
+  } else if (currentApi === '/detect/vl') {
+    // 百炼统一接口
+    icon = '🧠'; title = '百炼 AI 检测报告'; titleColor = '#a78bfa';
+    detail = data.alarm_count+' 项报警 / '+(data.results?data.results.length:0)+' 项检测 ('+data.elapsed_ms+'ms)';
+    level = data.alarm_count > 0 ? 'warning' : 'none';
+  } else if (currentApi.startsWith('/detect/vl/')) {
+    // 百炼单项接口
+    if (data.is_alarm) { icon='⚠️'; title='报警: '+data.name; titleColor='#f87171'; level='warning'; }
+    else { icon='✅'; title='安全: '+data.name; titleColor='#4ade80'; level='none'; }
+    detail = '耗时 '+data.elapsed_ms+'ms';
   }
 
   result.className = 'result show ' + level;
   let html = '<div class="result-icon">'+icon+'</div>';
   html += '<div class="result-title" style="color:'+titleColor+'">'+title+'</div>';
   if (detail) html += '<div class="result-detail">'+detail+'</div>';
+  // 百炼统一接口显示详细列表
+  if (currentApi === '/detect/vl' && data.results) {
+    html += '<div class="result-detail" style="display:grid;grid-template-columns:1fr 1fr;gap:4px;text-align:left;max-width:400px;margin:8px auto">';
+    data.results.forEach(r => {
+      const isAlarm = r.value === 'alarm';
+      const bgColor = isAlarm ? "rgba(248,113,113,.1)" : "rgba(74,222,128,.05)";
+      html += '<div style="padding:3px 8px;border-radius:4px;font-size:11px;background:'+bgColor+'">';
+      html += (isAlarm?'⚠️ ':'✅ ')+r.name;
+      html += '</div>';
+    });
+    html += '</div>';
+  }
   if (data.detections && data.detections.length > 0) {
     html += '<div class="result-detail">';
     data.detections.forEach(d => {
@@ -963,6 +1209,310 @@ def demo_page():
 @app.get("/demo/person", response_class=HTMLResponse)
 def demo_person_page():
     return DEMO_HTML
+
+
+# ===================================================================
+# 百炼 qwen3-vl-flash 视觉模型接口
+# ===================================================================
+
+VL_DETECTION_ITEMS = [
+    ("no_helmet", "未佩戴安全帽"),
+    ("no_reflective_vest", "未穿戴反光衣"),
+    ("no_workwear", "未穿工服"),
+    ("sleeping_on_duty", "睡岗"),
+    ("falling_or_fallen", "跌倒"),
+    ("smoking", "抽烟"),
+    ("using_phone", "使用手机"),
+    ("fighting", "打架"),
+    ("hot_work_unattended", "动火离人"),
+    ("electric_bicycle", "电瓶车"),
+    ("truck", "货车"),
+    ("car", "小汽车"),
+]
+
+VL_PROMPT = """你在做安全违规报警检测。所有 key 的 value 中，"alarm" 表示该项需要报警，"safe" 表示该项不报警。
+
+先找出图片中所有可见人员；只要任意一名人员满足某项报警条件，该项就是 "alarm"。不要默认全 safe。无法看清人体对应部位时才按 safe。
+
+穿戴类报警规则：
+- no_helmet、no_reflective_vest、no_workwear 这三项表示"未戴/未穿"的报警，不是检测画面里有没有装备。
+- 没戴安全帽、没穿反光衣、没穿工服，都应该输出 alarm。
+- 安全帽、反光衣、工服必须穿戴在正确身体部位才算合规；手拿、放旁边、挂在身上但未穿戴，都算未穿戴。
+- 三项穿戴必须独立判断：戴了安全帽不代表穿了反光衣或工服；穿了普通衣服不代表穿了工服；穿了工服也不代表穿了反光衣。
+- no_reflective_vest 和 no_workwear 可以同时为 alarm；不要因为某人戴了安全帽就把这两项设为 safe。
+- 如果图片中有人穿日常服装且没有反光条/高可视背心，通常 no_reflective_vest=alarm 且 no_workwear=alarm。
+
+只输出严格 JSON 对象。必须包含且只包含这些 key，每个 value 只能是 "alarm" 或 "safe"：
+no_helmet, no_reflective_vest, no_workwear, sleeping_on_duty, falling_or_fallen, smoking, using_phone, fighting, hot_work_unattended, electric_bicycle, truck, car
+
+逐项口径：
+no_helmet=任意人员头部清晰可见，且安全帽没有戴在头上，则 alarm。普通帽子、鸭舌帽、头巾不算安全帽。手里提着/拿着安全帽、放在旁边、挂在胳膊上，都算未佩戴。
+no_reflective_vest=任意人员躯干清晰可见，且身上没有穿反光衣/高可视背心/高可视外套，则 alarm。反光衣通常有荧光黄/橙/绿等高可视颜色或明显反光条；普通卫衣、T恤、夹克、外套、休闲服都不算反光衣。
+no_workwear=任意人员躯干清晰可见，且身上不是统一工服/作业服/明显工装，则 alarm。普通卫衣、T恤、休闲裤、牛仔裤、运动鞋、日常服装都不算工服。
+sleeping_on_duty=可见人员明显趴睡、闭眼倚靠休息或躺卧睡觉，则 alarm。
+falling_or_fallen=可见人员明显倒地、摔倒姿态、异常躺卧地面或正在跌倒，则 alarm。
+smoking=可见香烟、吸烟动作或人员吸烟相关烟雾，则 alarm。
+using_phone=可见人员手持手机通话、看屏或操作手机，则 alarm。
+fighting=可见推搡、挥拳、踢打或多人肢体冲突，则 alarm。
+hot_work_unattended=可见焊接、切割、明火、火花等动火作业，且附近没有可见人员看护/操作，则 alarm。
+electric_bicycle=可见电动自行车、电摩或踏板式电动车，则 alarm。
+truck=可见厢式货车、卡车、工程货车或货运车辆，则 alarm。
+car=可见轿车、SUV、MPV 等乘用车，则 alarm。"""
+
+
+class VLResult(BaseModel):
+    id: str
+    name: str
+    value: str
+
+class VLDetectResponse(BaseModel):
+    success: bool
+    results: list[VLResult]
+    alarm_count: int
+    elapsed_ms: int
+    model: str
+    message: str
+
+class VLSingleResponse(BaseModel):
+    success: bool
+    id: str
+    name: str
+    value: str
+    is_alarm: bool
+    elapsed_ms: int
+    model: str
+    message: str
+
+
+async def call_qwen_vl(image_data_url: str) -> dict:
+    endpoint = f"{DASHSCOPE_BASE_URL.rstrip('/')}/chat/completions"
+    async with httpx.AsyncClient(timeout=VL_TIMEOUT) as client:
+        resp = await client.post(endpoint, json={
+            "model": DASHSCOPE_MODEL,
+            "max_tokens": VL_MAX_TOKENS,
+            "temperature": 0,
+            "response_format": {"type": "json_object"},
+            "enable_thinking": False,
+            "vl_high_resolution_images": False,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": image_data_url}, "max_pixels": VL_MAX_PIXELS},
+                    {"type": "text", "text": VL_PROMPT}
+                ]
+            }]
+        }, headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {DASHSCOPE_API_KEY}"
+        })
+        data = resp.json()
+        if not resp.is_success:
+            raise HTTPException(502, f"百炼 API 错误: {data.get('error',{}).get('message','HTTP '+str(resp.status_code))}")
+        content = data["choices"][0]["message"].get("content", "")
+        if not content:
+            raise HTTPException(502, "百炼返回空内容")
+        clean = content.strip()
+        if clean.startswith("```"):
+            clean = clean.split("\n", 1)[-1].rsplit("```", 1)[0]
+        parsed = json_module.loads(clean)
+        return {"parsed": parsed, "usage": data.get("usage", {})}
+
+
+def normalize_vl_result(parsed: dict) -> list[VLResult]:
+    results = []
+    for item_id, item_name in VL_DETECTION_ITEMS:
+        val = parsed.get(item_id, "safe")
+        if isinstance(val, dict):
+            val = val.get("alarm", val.get("result", val.get("value", "safe")))
+        val = str(val).lower().strip()
+        is_alarm = val in ("alarm", "yes", "true", "1", "detected")
+        results.append(VLResult(id=item_id, name=item_name, value="alarm" if is_alarm else "safe"))
+    return results
+
+
+async def image_to_data_url(image: Image.Image) -> str:
+    buf = io.BytesIO()
+    image.save(buf, format="JPEG", quality=85)
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    return f"data:image/jpeg;base64,{b64}"
+
+
+@app.post("/detect/vl", response_model=VLDetectResponse)
+async def detect_vl(file: UploadFile = File(...)):
+    """百炼视觉统一检测：一次调用返回 12 项 alarm/safe"""
+    allowed_image(file)
+    image, _, _ = await read_image(file)
+    data_url = await image_to_data_url(image)
+    t0 = time.time()
+    result = await call_qwen_vl(data_url)
+    elapsed = int((time.time() - t0) * 1000)
+    items = normalize_vl_result(result["parsed"])
+    alarm_count = sum(1 for i in items if i.value == "alarm")
+    return VLDetectResponse(
+        success=True, results=items, alarm_count=alarm_count,
+        elapsed_ms=elapsed, model=DASHSCOPE_MODEL,
+        message=f"检测完成，{alarm_count} 项报警" if alarm_count else "全部安全"
+    )
+
+
+@app.post("/detect/vl/no-helmet", response_model=VLSingleResponse)
+async def detect_vl_no_helmet(file: UploadFile = File(...)):
+    return await _vl_single(file, "no_helmet", "未佩戴安全帽")
+
+@app.post("/detect/vl/no-reflective-vest", response_model=VLSingleResponse)
+async def detect_vl_no_reflective_vest(file: UploadFile = File(...)):
+    return await _vl_single(file, "no_reflective_vest", "未穿戴反光衣")
+
+@app.post("/detect/vl/no-workwear", response_model=VLSingleResponse)
+async def detect_vl_no_workwear(file: UploadFile = File(...)):
+    return await _vl_single(file, "no_workwear", "未穿工服")
+
+@app.post("/detect/vl/sleeping", response_model=VLSingleResponse)
+async def detect_vl_sleeping(file: UploadFile = File(...)):
+    return await _vl_single(file, "sleeping_on_duty", "睡岗")
+
+@app.post("/detect/vl/fall", response_model=VLSingleResponse)
+async def detect_vl_fall(file: UploadFile = File(...)):
+    return await _vl_single(file, "falling_or_fallen", "跌倒")
+
+@app.post("/detect/vl/smoking", response_model=VLSingleResponse)
+async def detect_vl_smoking(file: UploadFile = File(...)):
+    return await _vl_single(file, "smoking", "抽烟")
+
+@app.post("/detect/vl/phone", response_model=VLSingleResponse)
+async def detect_vl_phone(file: UploadFile = File(...)):
+    return await _vl_single(file, "using_phone", "使用手机")
+
+@app.post("/detect/vl/fight", response_model=VLSingleResponse)
+async def detect_vl_fight(file: UploadFile = File(...)):
+    return await _vl_single(file, "fighting", "打架")
+
+@app.post("/detect/vl/hot-work", response_model=VLSingleResponse)
+async def detect_vl_hot_work(file: UploadFile = File(...)):
+    return await _vl_single(file, "hot_work_unattended", "动火离人")
+
+@app.post("/detect/vl/e-bike", response_model=VLSingleResponse)
+async def detect_vl_e_bike(file: UploadFile = File(...)):
+    return await _vl_single(file, "electric_bicycle", "电瓶车")
+
+@app.post("/detect/vl/truck", response_model=VLSingleResponse)
+async def detect_vl_truck(file: UploadFile = File(...)):
+    return await _vl_single(file, "truck", "货车")
+
+@app.post("/detect/vl/car", response_model=VLSingleResponse)
+async def detect_vl_car(file: UploadFile = File(...)):
+    return await _vl_single(file, "car", "小汽车")
+
+
+# ===================================================================
+# 百炼：人物+动物联合检测
+# ===================================================================
+
+VL_PERSON_ANIMAL_PROMPT = """分析这张图片，判断是否有人以及有什么动物。
+
+只输出严格 JSON 对象，格式如下：
+{
+  "has_person": true/false,
+  "person_count": 数字,
+  "has_animal": true/false,
+  "animals": [{"type": "动物中文名", "count": 数字}]
+}
+
+规则：
+- has_person: 图片中是否有人（包括全身、半身、远景人影）
+- person_count: 可见人员数量
+- has_animal: 图片中是否有动物（哺乳动物、鸟类、爬行动物、鱼类、昆虫等）
+- animals: 每种动物的类型和数量，按数量从多到少排列
+- 动物名称用中文（如：狗、猫、鸟、马、牛、羊、猪、鸡、鸭、鱼、蛇、蜥蜴、兔子、松鼠、鹿、狐狸、熊、大象、猴子、蝴蝶、蜜蜂、蜘蛛等）
+- 如果没有动物，animals 为空数组 []
+- 如果看不清具体动物种类但能确认是动物，type 写"未知动物"
+- 只输出 JSON，不要任何其他文字"""
+
+
+class VLAnimalItem(BaseModel):
+    type: str
+    count: int
+
+
+@app.post("/detect/vl/person-animal", response_model=VLPersonAnimalResponse)
+async def detect_vl_person_animal(file: UploadFile = File(...)):
+    """百炼视觉：检测图中是否有人以及有什么动物"""
+    allowed_image(file)
+    image, _, _ = await read_image(file)
+    data_url = await image_to_data_url(image)
+    t0 = time.time()
+    
+    endpoint = f"{DASHSCOPE_BASE_URL.rstrip('/')}/chat/completions"
+    async with httpx.AsyncClient(timeout=VL_TIMEOUT) as client:
+        resp = await client.post(endpoint, json={
+            "model": DASHSCOPE_MODEL,
+            "max_tokens": 500,
+            "temperature": 0,
+            "response_format": {"type": "json_object"},
+            "enable_thinking": False,
+            "vl_high_resolution_images": False,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": data_url}, "max_pixels": VL_MAX_PIXELS},
+                    {"type": "text", "text": VL_PERSON_ANIMAL_PROMPT}
+                ]
+            }]
+        }, headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {DASHSCOPE_API_KEY}"
+        })
+        data = resp.json()
+        if not resp.is_success:
+            raise HTTPException(502, f"百炼 API 错误: {data.get('error',{}).get('message','HTTP '+str(resp.status_code))}")
+        content = data["choices"][0]["message"].get("content", "")
+        if not content:
+            raise HTTPException(502, "百炼返回空内容")
+        clean = content.strip()
+        if clean.startswith("```"):
+            clean = clean.split("\n", 1)[-1].rsplit("```", 1)[0]
+        parsed = json_module.loads(clean)
+    
+    elapsed = int((time.time() - t0) * 1000)
+    has_p = parsed.get("has_person", False)
+    pc = parsed.get("person_count", 0)
+    has_a = parsed.get("has_animal", False)
+    animals_raw = parsed.get("animals", [])
+    animals = [{"type": a.get("type", "未知"), "count": int(a.get("count", 1))} for a in animals_raw]
+    
+    parts = []
+    if has_p: parts.append(f"{pc} 人")
+    if has_a: parts.append(f"{sum(a['count'] for a in animals)} 只动物")
+    msg = "检测到 " + "，".join(parts) if parts else "未检测到人或动物"
+    if animals:
+        animal_str = "，".join(f"{a['type']}×{a['count']}" for a in animals[:8])
+        msg += f" ({animal_str})"
+    
+    return VLPersonAnimalResponse(
+        success=True, has_person=has_p, person_count=pc,
+        has_animal=has_a, animals=animals,
+        elapsed_ms=elapsed, model=DASHSCOPE_MODEL, message=msg
+    )
+
+
+async def _vl_single(file: UploadFile, item_id: str, item_name: str) -> VLSingleResponse:
+    allowed_image(file)
+    image, _, _ = await read_image(file)
+    data_url = await image_to_data_url(image)
+    t0 = time.time()
+    result = await call_qwen_vl(data_url)
+    elapsed = int((time.time() - t0) * 1000)
+    items = normalize_vl_result(result["parsed"])
+    target = next((i for i in items if i.id == item_id), None)
+    if target is None:
+        return VLSingleResponse(success=False, id=item_id, name=item_name, value="safe", is_alarm=False, elapsed_ms=elapsed, model=DASHSCOPE_MODEL, message="未找到结果")
+    is_alarm = target.value == "alarm"
+    return VLSingleResponse(
+        success=True, id=target.id, name=target.name, value=target.value,
+        is_alarm=is_alarm, elapsed_ms=elapsed, model=DASHSCOPE_MODEL,
+        message=f"{'报警' if is_alarm else '安全'}: {item_name}"
+    )
+
 
 if __name__ == "__main__":
     import uvicorn
